@@ -1,12 +1,19 @@
 package de.ytendx.haproxy.tinyprotocol;
 
+import de.ytendx.haproxy.HAProxySpigotImplementor;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.sql.Ref;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
+
+import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.haproxy.HAProxyMessage;
 import io.netty.handler.codec.haproxy.HAProxyMessageDecoder;
 import org.bukkit.Bukkit;
@@ -22,16 +29,19 @@ import com.google.common.collect.Lists;
  * @author Kristian // Love ya <3 ~ytendx
  */
 public class TinyProtocol {
-	private static final AtomicInteger ID = new AtomicInteger(0);
 
 	// Looking up ServerConnection
 	private static final Class<Object> minecraftServerClass = Reflection.getUntypedClass("{nms}.MinecraftServer");
-	private static final Class<Object> serverConnectionClass = Reflection.getUntypedClass("{nms}.ServerConnection");
+	private static final Class<Object> serverConnectionClass = Reflection.getUntypedClass("{nms}" + (Reflection.isNewerPackage() ? ".network" : "") + ".ServerConnection");
 	private static final Reflection.FieldAccessor<Object> getMinecraftServer = Reflection.getField("{obc}.CraftServer", minecraftServerClass, 0);
 	private static final Reflection.FieldAccessor<Object> getServerConnection = Reflection.getField(minecraftServerClass, serverConnectionClass, 0);
-	private static final Reflection.MethodInvoker getNetworkMarkers = Reflection.getTypedMethod(serverConnectionClass, null, List.class, serverConnectionClass);
+	private static final Reflection.FieldAccessor<List> networkManagersFieldAccessor;
 
-	private static final Class<Object> networkManager = Reflection.getUntypedClass("{nms}.NetworkManager");
+	static {
+		networkManagersFieldAccessor = Reflection.isNewerPackage() ? Reflection.getField(serverConnectionClass, List.class, 0) : null;
+	}
+
+	private static final Class<Object> networkManager = Reflection.getUntypedClass(Reflection.isNewerPackage() ? "net.minecraft.network.NetworkManager" : "{nms}.NetworkManager");
 	private static final Reflection.FieldAccessor<SocketAddress> socketAddressFieldAccessor = Reflection.getField(networkManager, SocketAddress.class, 0);
 	// List of network markers
 	private List<Object> networkManagers;
@@ -42,10 +52,6 @@ public class TinyProtocol {
 	private ChannelInitializer<Channel> beginInitProtocol;
 	private ChannelInitializer<Channel> endInitProtocol;
 
-	// Current handler name
-	private String handlerName;
-
-	protected volatile boolean closed;
 	protected Plugin plugin;
 
 	/**
@@ -57,10 +63,8 @@ public class TinyProtocol {
 	 */
 	public TinyProtocol(final Plugin plugin) {
 		this.plugin = plugin;
-
-		// Compute handler name
-		this.handlerName = getHandlerName();
-
+		
+		//Useless logging -> plugin.getLogger().info(Reflection.isNewerPackage() + " | " + Reflection.NMS_PREFIX);
 
 		try {
 			plugin.getLogger().info("Proceeding with the server channel injection...");
@@ -86,12 +90,22 @@ public class TinyProtocol {
 			@Override
 			protected void initChannel(Channel channel) throws Exception {
 				try {
+					if (Reflection.isNewerPackage()){
+						synchronized (networkManagers) {
+							// Adding the decoder to the pipeline
+							channel.pipeline().addFirst("haproxy-decoder", new HAProxyMessageDecoder());
+							// Adding the proxy message handler to the pipeline too
+							channel.pipeline().addAfter("haproxy-decoder", "haproxy-handler", HAPROXY_MESSAGE_HANDLER);
+						}
+						return;
+					}
+
 					// Adding the decoder to the pipeline
 					channel.pipeline().addAfter("timeout", "haproxy-decoder", new HAProxyMessageDecoder());
 					// Adding the proxy message handler to the pipeline too
 					channel.pipeline().addAfter("haproxy-decoder", "haproxy-handler", HAPROXY_MESSAGE_HANDLER);
 				} catch (Exception e) {
-					plugin.getLogger().log(Level.SEVERE, "Cannot inject incomming channel " + channel, e);
+					plugin.getLogger().log(Level.SEVERE, "Cannot inject incoming channel " + channel, e);
 				}
 			}
 
@@ -128,7 +142,7 @@ public class TinyProtocol {
 		boolean looking = true;
 
 		// We need to synchronize against this list
-		networkManagers = (List<Object>) getNetworkMarkers.invoke(null, serverConnection);
+		networkManagers = Reflection.isNewerPackage() ? networkManagersFieldAccessor.get(serverConnection) : new ArrayList<>();
 		createServerChannelHandler();
 
 		// Find the correct list, or implicitly throw an exception
@@ -149,17 +163,6 @@ public class TinyProtocol {
 				plugin.getLogger().info("Found the server channel and added the handler. Injection successfully!");
 			}
 		}
-	}
-
-	/**
-	 * Retrieve the name of the channel injector, default implementation is "tiny-" + plugin name + "-" + a unique ID.
-	 * <p>
-	 * Note that this method will only be invoked once. It is no longer necessary to override this to support multiple instances.
-	 * 
-	 * @return A unique channel handler name.
-	 */
-	protected String getHandlerName() {
-		return "haproxy-implementor-tiny-" + plugin.getName() + "-" + ID.incrementAndGet();
 	}
 
 	private final HAProxyMessageHandler HAPROXY_MESSAGE_HANDLER = new HAProxyMessageHandler();
